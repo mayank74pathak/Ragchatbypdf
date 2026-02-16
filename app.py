@@ -44,36 +44,61 @@ def get_vector_store(text_chunks):
 
 
 def get_conversational_chain():
+
     prompt_template = """
-    Answer the question as detailed as possible from the provided context, make sure to provide all the details,
-    if the answer is not in provided context just say, "answer is not available in the context",
-    don't provide the wrong answer.
+    Answer the question as detailed as possible from the provided context.
+    If the answer is not in provided context just say,
+    "answer is not available in the context".
+    Don't provide the wrong answer.
 
     Context:
     {context}
 
-    Question: 
-    {question}
-
-    Answer:
+    Question:
+    {input}
     """
 
-    model = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.3)
-    prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
-    chain = load_qa_chain(model, chain_type="stuff", prompt=prompt)
-    return chain
+    model = ChatGoogleGenerativeAI(
+        model="gemini-2.0-flash",   # ✅ unchanged
+        temperature=0.3
+    )
+
+    prompt = PromptTemplate(
+        template=prompt_template,
+        input_variables=["context", "input"]
+    )
+
+    document_chain = create_stuff_documents_chain(model, prompt)
+
+    embeddings = get_embeddings()
+    db = FAISS.load_local(
+        "faiss_index",
+        embeddings,
+        allow_dangerous_deserialization=True
+    )
+
+    retriever = db.as_retriever(search_kwargs={"k": 3})
+
+    retrieval_chain = create_retrieval_chain(retriever, document_chain)
+
+    return retrieval_chain
 
 
 def user_input(user_question):
-    embeddings = get_embeddings()
-    new_db = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
-    docs = new_db.similarity_search(user_question)
 
-    chain = get_conversational_chain()
-    response = chain({"input_documents": docs, "question": user_question}, return_only_outputs=True)
+    if not os.path.exists("faiss_index"):
+        st.warning("⚠️ Please upload and process a PDF first.")
+        return
 
-    print(response)
-    st.write("Reply: ", response["output_text"])
+    try:
+        chain = get_conversational_chain()
+        response = chain.invoke({"input": user_question})
+
+        st.write("Reply:", response["answer"])
+
+    except Exception as e:
+        st.error(f"❌ Error: {str(e)}")
+
 
 
 def main():
