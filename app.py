@@ -2,21 +2,17 @@ import streamlit as st
 from PyPDF2 import PdfReader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 import os
-import google.generativeai as genai
 from langchain_community.vectorstores import FAISS
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain.chains.retrieval import create_retrieval_chain
 from langchain_core.prompts import PromptTemplate
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.output_parsers import StrOutputParser
 from dotenv import load_dotenv
 from langchain_community.embeddings import HuggingFaceEmbeddings
 
 # Load environment variables
 load_dotenv()
-apikey = os.getenv("GOOGLE_API_KEY")
-genai.configure(api_key=apikey)
 
-# ✅ Use Hugging Face local embeddings
 def get_embeddings():
     return HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
@@ -39,25 +35,25 @@ def get_vector_store(text_chunks):
     vector_store.save_local("faiss_index")
 
 def get_conversational_chain():
-    prompt_template = """
+    prompt_template = PromptTemplate.from_template("""
     Answer the question as detailed as possible from the provided context.
     If the answer is not in provided context just say,
     "answer is not available in the context".
     Don't provide the wrong answer.
+
     Context:
     {context}
+
     Question:
-    {input}
-    """
+    {question}
+    """)
+
     model = ChatGoogleGenerativeAI(
-        model="gemini-2.0-flash-exp",
-        temperature=0.3
+        model="gemini-2.0-flash",
+        temperature=0.3,
+        google_api_key=os.getenv("GOOGLE_API_KEY")
     )
-    prompt = PromptTemplate(
-        template=prompt_template,
-        input_variables=["context", "input"]
-    )
-    document_chain = create_stuff_documents_chain(model, prompt)
+
     embeddings = get_embeddings()
     db = FAISS.load_local(
         "faiss_index",
@@ -65,8 +61,18 @@ def get_conversational_chain():
         allow_dangerous_deserialization=True
     )
     retriever = db.as_retriever(search_kwargs={"k": 3})
-    retrieval_chain = create_retrieval_chain(retriever, document_chain)
-    return retrieval_chain
+
+    def format_docs(docs):
+        return "\n\n".join(doc.page_content for doc in docs)
+
+    # LCEL chain — no langchain.chains needed at all
+    chain = (
+        {"context": retriever | format_docs, "question": RunnablePassthrough()}
+        | prompt_template
+        | model
+        | StrOutputParser()
+    )
+    return chain
 
 def user_input(user_question):
     if not os.path.exists("faiss_index"):
@@ -74,14 +80,14 @@ def user_input(user_question):
         return
     try:
         chain = get_conversational_chain()
-        response = chain.invoke({"input": user_question})
-        st.write("Reply:", response["answer"])
+        response = chain.invoke(user_question)
+        st.write("Reply:", response)
     except Exception as e:
         st.error(f"❌ Error: {str(e)}")
 
 def main():
     st.set_page_config("Chat PDF")
-    st.header("Chat with PDF using Gemini + HuggingFace💁")
+    st.header("Chat with PDF using Gemini + HuggingFace 💁")
     user_question = st.text_input("Ask a Question from the PDF Files")
     if user_question:
         user_input(user_question)
