@@ -5,21 +5,20 @@ import os
 import google.generativeai as genai
 from langchain_community.vectorstores import FAISS
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.chains.question_answering import load_qa_chain
-from langchain.prompts import PromptTemplate
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain.chains.retrieval import create_retrieval_chain
+from langchain_core.prompts import PromptTemplate
 from dotenv import load_dotenv
-from langchain.embeddings import HuggingFaceEmbeddings  # ✅ new import
+from langchain_community.embeddings import HuggingFaceEmbeddings
 
 # Load environment variables
 load_dotenv()
 apikey = os.getenv("GOOGLE_API_KEY")
 genai.configure(api_key=apikey)
 
-
 # ✅ Use Hugging Face local embeddings
 def get_embeddings():
     return HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-
 
 def get_pdf_text(pdf_docs):
     text = ""
@@ -29,61 +28,63 @@ def get_pdf_text(pdf_docs):
             text += page.extract_text()
     return text
 
-
 def get_text_chunks(text):
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=200)
     chunks = text_splitter.split_text(text)
     return chunks
-
 
 def get_vector_store(text_chunks):
     embeddings = get_embeddings()
     vector_store = FAISS.from_texts(text_chunks, embedding=embeddings)
     vector_store.save_local("faiss_index")
 
-
 def get_conversational_chain():
     prompt_template = """
-    Answer the question as detailed as possible from the provided context, make sure to provide all the details,
-    if the answer is not in provided context just say, "answer is not available in the context",
-    don't provide the wrong answer.
-
+    Answer the question as detailed as possible from the provided context.
+    If the answer is not in provided context just say,
+    "answer is not available in the context".
+    Don't provide the wrong answer.
     Context:
     {context}
-
-    Question: 
-    {question}
-
-    Answer:
+    Question:
+    {input}
     """
-
-    model = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.3)
-    prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
-    chain = load_qa_chain(model, chain_type="stuff", prompt=prompt)
-    return chain
-
+    model = ChatGoogleGenerativeAI(
+        model="gemini-2.0-flash-exp",
+        temperature=0.3
+    )
+    prompt = PromptTemplate(
+        template=prompt_template,
+        input_variables=["context", "input"]
+    )
+    document_chain = create_stuff_documents_chain(model, prompt)
+    embeddings = get_embeddings()
+    db = FAISS.load_local(
+        "faiss_index",
+        embeddings,
+        allow_dangerous_deserialization=True
+    )
+    retriever = db.as_retriever(search_kwargs={"k": 3})
+    retrieval_chain = create_retrieval_chain(retriever, document_chain)
+    return retrieval_chain
 
 def user_input(user_question):
-    embeddings = get_embeddings()
-    new_db = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
-    docs = new_db.similarity_search(user_question)
-
-    chain = get_conversational_chain()
-    response = chain({"input_documents": docs, "question": user_question}, return_only_outputs=True)
-
-    print(response)
-    st.write("Reply: ", response["output_text"])
-
+    if not os.path.exists("faiss_index"):
+        st.warning("⚠️ Please upload and process a PDF first.")
+        return
+    try:
+        chain = get_conversational_chain()
+        response = chain.invoke({"input": user_question})
+        st.write("Reply:", response["answer"])
+    except Exception as e:
+        st.error(f"❌ Error: {str(e)}")
 
 def main():
     st.set_page_config("Chat PDF")
     st.header("Chat with PDF using Gemini + HuggingFace💁")
-
     user_question = st.text_input("Ask a Question from the PDF Files")
-
     if user_question:
         user_input(user_question)
-
     with st.sidebar:
         st.title("Menu:")
         pdf_docs = st.file_uploader(
@@ -96,7 +97,6 @@ def main():
                 text_chunks = get_text_chunks(raw_text)
                 get_vector_store(text_chunks)
                 st.success("Done")
-
 
 if __name__ == "__main__":
     main()
