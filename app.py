@@ -1,108 +1,131 @@
 import streamlit as st
 from PyPDF2 import PdfReader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-import os
 from langchain_community.vectorstores import FAISS
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.prompts import PromptTemplate
-from langchain_core.runnables import RunnablePassthrough
-from langchain_core.output_parsers import StrOutputParser
-from dotenv import load_dotenv
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain.chains.question_answering import load_qa_chain
+from langchain.prompts import PromptTemplate
+from langchain.embeddings import HuggingFaceEmbeddings
+from langchain_groq import ChatGroq
 
-# Load environment variables
-load_dotenv()
-
+# ✅ Use Hugging Face local embeddings
 def get_embeddings():
     return HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+
 
 def get_pdf_text(pdf_docs):
     text = ""
     for pdf in pdf_docs:
         pdf_reader = PdfReader(pdf)
         for page in pdf_reader.pages:
-            text += page.extract_text()
+            if page.extract_text():
+                text += page.extract_text()
     return text
 
+
 def get_text_chunks(text):
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=200)
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=2000,
+        chunk_overlap=200
+    )
     chunks = text_splitter.split_text(text)
     return chunks
+
 
 def get_vector_store(text_chunks):
     embeddings = get_embeddings()
     vector_store = FAISS.from_texts(text_chunks, embedding=embeddings)
     vector_store.save_local("faiss_index")
 
+
 def get_conversational_chain():
-    prompt_template = PromptTemplate.from_template("""
+    prompt_template = """
     Answer the question as detailed as possible from the provided context.
-    If the answer is not in provided context just say,
-    "answer is not available in the context".
-    Don't provide the wrong answer.
+    If the answer is not in the provided context, just say:
+    "Answer is not available in the context".
+    Do NOT make up answers.
 
     Context:
     {context}
 
     Question:
     {question}
-    """)
 
-    model = ChatGoogleGenerativeAI(
-        model="gemini-2.0-flash",
-        temperature=0.3,
-        google_api_key=os.getenv("GOOGLE_API_KEY")
+    Answer:
+    """
+
+    model = ChatGroq(
+        groq_api_key=st.secrets["GROQ_API_KEY"],
+        model_name="llama-3.1-8b-instant",  # 🔥 fast model
+        temperature=0.3
     )
 
+    prompt = PromptTemplate(
+        template=prompt_template,
+        input_variables=["context", "question"]
+    )
+
+    chain = load_qa_chain(
+        model,
+        chain_type="stuff",
+        prompt=prompt
+    )
+
+    return chain
+
+
+def user_input(user_question):
     embeddings = get_embeddings()
-    db = FAISS.load_local(
+
+    new_db = FAISS.load_local(
         "faiss_index",
         embeddings,
         allow_dangerous_deserialization=True
     )
-    retriever = db.as_retriever(search_kwargs={"k": 3})
 
-    def format_docs(docs):
-        return "\n\n".join(doc.page_content for doc in docs)
+    docs = new_db.similarity_search(user_question)
 
-    # LCEL chain — no langchain.chains needed at all
-    chain = (
-        {"context": retriever | format_docs, "question": RunnablePassthrough()}
-        | prompt_template
-        | model
-        | StrOutputParser()
+    chain = get_conversational_chain()
+
+    response = chain(
+        {"input_documents": docs, "question": user_question},
+        return_only_outputs=True
     )
-    return chain
 
-def user_input(user_question):
-    if not os.path.exists("faiss_index"):
-        st.warning("⚠️ Please upload and process a PDF first.")
-        return
-    try:
-        chain = get_conversational_chain()
-        response = chain.invoke(user_question)
-        st.write("Reply:", response)
-    except Exception as e:
-        st.error(f"❌ Error: {str(e)}")
+    st.write("### Reply:")
+    st.write(response["output_text"])
+
 
 def main():
-    st.set_page_config("Chat PDF")
-    st.header("Chat with PDF using Gemini + HuggingFace 💁")
-    user_question = st.text_input("Ask a Question from the PDF Files")
+    st.set_page_config(page_title="Chat PDF", layout="wide")
+
+    st.header("📄 Chat with PDF using Groq + HuggingFace")
+
+    user_question = st.text_input("Ask a question from your PDF files")
+
     if user_question:
         user_input(user_question)
+
     with st.sidebar:
-        st.title("Menu:")
+        st.title("📂 Menu")
+
         pdf_docs = st.file_uploader(
-            "Upload your PDF Files and Click on the Submit & Process Button",
+            "Upload your PDF files",
             accept_multiple_files=True
         )
+
         if st.button("Submit & Process"):
             with st.spinner("Processing..."):
                 raw_text = get_pdf_text(pdf_docs)
+
+                if not raw_text.strip():
+                    st.error("No readable text found in PDFs")
+                    return
+
                 text_chunks = get_text_chunks(raw_text)
                 get_vector_store(text_chunks)
-                st.success("Done")
+
+                st.success("Processing complete!")
+
 
 if __name__ == "__main__":
     main()
